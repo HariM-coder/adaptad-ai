@@ -1,0 +1,202 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AdaptAd AI - Infrastructure for Multi-Audience Ad Generator'
+
+Parameters:
+  S3BucketName:
+    Type: String
+    Default: 'adaptad-generated-images'
+    Description: 'S3 bucket name for storing generated images'
+  
+  LambdaFunctionName:
+    Type: String
+    Default: 'adaptad-ai-generator'
+    Description: 'Lambda function name for ad generation'
+
+Resources:
+  # S3 Bucket for storing generated images
+  AdaptAdImageBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref S3BucketName
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - GET
+              - POST
+              - PUT
+            AllowedOrigins:
+              - '*'
+            MaxAge: 3000
+
+  # S3 Bucket Policy for public read access
+  AdaptAdImageBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AdaptAdImageBucket
+      PolicyDocument:
+        Statement:
+          - Sid: PublicReadGetObject
+            Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: !Sub '${AdaptAdImageBucket}/*'
+
+  # IAM Role for Lambda function
+  AdaptAdLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AdaptAdBedrockPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: '*'
+        - PolicyName: AdaptAdS3Policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub '${AdaptAdImageBucket}/*'
+
+  # Lambda function for ad generation
+  AdaptAdLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref LambdaFunctionName
+      Runtime: python3.9
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt AdaptAdLambdaRole.Arn
+      Timeout: 300
+      MemorySize: 1024
+      Code:
+        ZipFile: |
+          import json
+          def lambda_handler(event, context):
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('AdaptAd AI Lambda function deployed successfully!')
+              }
+      Environment:
+        Variables:
+          S3_BUCKET_NAME: !Ref AdaptAdImageBucket
+
+  # API Gateway for Lambda function
+  AdaptAdApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: AdaptAd-AI-API
+      Description: API for AdaptAd AI ad generation
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  # API Gateway Resource
+  AdaptAdApiResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref AdaptAdApiGateway
+      ParentId: !GetAtt AdaptAdApiGateway.RootResourceId
+      PathPart: generate
+
+  # API Gateway Method
+  AdaptAdApiMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref AdaptAdApiGateway
+      ResourceId: !Ref AdaptAdApiResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AdaptAdLambdaFunction.Arn}/invocations'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseHeaders:
+            Access-Control-Allow-Origin: true
+
+  # API Gateway CORS Options Method
+  AdaptAdApiOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref AdaptAdApiGateway
+      ResourceId: !Ref AdaptAdApiResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # API Gateway Deployment
+  AdaptAdApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - AdaptAdApiMethod
+      - AdaptAdApiOptionsMethod
+    Properties:
+      RestApiId: !Ref AdaptAdApiGateway
+      StageName: prod
+
+  # Lambda Permission for API Gateway
+  AdaptAdLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AdaptAdLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub '${AdaptAdApiGateway}/*/POST/generate'
+
+Outputs:
+  S3BucketName:
+    Description: 'S3 bucket name for generated images'
+    Value: !Ref AdaptAdImageBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-S3Bucket'
+
+  LambdaFunctionArn:
+    Description: 'Lambda function ARN'
+    Value: !GetAtt AdaptAdLambdaFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaFunction'
+
+  ApiGatewayUrl:
+    Description: 'API Gateway URL'
+    Value: !Sub 'https://${AdaptAdApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod/generate'
+    Export:
+      Name: !Sub '${AWS::StackName}-ApiUrl'
